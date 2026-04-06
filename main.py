@@ -1172,5 +1172,5 @@ if __name__ == "__main__":
     """
     run_full_pipeline(
         dataset_path=BASE_DIR,
-        use_sample=True    # ← passer à False si le dataset est disponible
+        use_sample=False    # ← passer à False si le dataset est disponible
     )
