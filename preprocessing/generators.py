@@ -8,9 +8,45 @@ Prêt pour l'entraînement au CR3.
 """
 
 from pathlib import Path
+import numpy as np
+import cv2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 from config.settings import IMG_SIZE_CNN, BATCH_SIZE, SEED
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PREPROCESSING_FUNCTION — Sharpening léger (étape ③ du pipeline)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Ordre Keras : load → resize → augment → preprocessing_function → rescale.
+# Donc à ce stade l'image est en float32 dans [0, 255] (rescale n'a pas encore
+# été appliqué). On fait le sharpening ici pour qu'il s'applique aux deux
+# splits (train ET val) — c'est une transformation déterministe qui fait
+# partie du pipeline, pas une augmentation.
+
+_SHARPEN_KERNEL = np.array([[0, -1,  0],
+                            [-1, 5, -1],
+                            [0, -1,  0]], dtype=np.float32)
+
+
+def _sharpen(img: np.ndarray) -> np.ndarray:
+    """Sharpening léger : convolution + clip dans [0, 255]."""
+    sharpened = cv2.filter2D(img.astype(np.float32), -1, _SHARPEN_KERNEL)
+    return np.clip(sharpened, 0.0, 255.0)
+
+
+def _train_preprocess(img: np.ndarray) -> np.ndarray:
+    """Train : variation de contraste aléatoire [0.60, 1.50] + sharpening."""
+    factor   = np.random.uniform(0.60, 1.50)
+    mean     = img.mean()
+    contrast = np.clip((img - mean) * factor + mean, 0.0, 255.0)
+    return _sharpen(contrast)
+
+
+def _val_preprocess(img: np.ndarray) -> np.ndarray:
+    """Val : sharpening seul (aucune augmentation aléatoire)."""
+    return _sharpen(img)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20,9 +56,15 @@ from config.settings import IMG_SIZE_CNN, BATCH_SIZE, SEED
 def build_keras_generators(color_dir: Path):
     """
     Construit les générateurs Keras pour l'entraînement futur (CR3).
-    L'augmentation est appliquée en temps réel (on-the-fly) sur le train set.
 
-    Split utilisé : 85% train / 15% val (via validation_split Keras)
+    Pipeline appliqué par les générateurs (par ordre d'exécution) :
+        ① Resize bilinéaire 256×256 → 128×128         (target_size)
+        ② Augmentation aléatoire (train uniquement)   (rotation, flip-h, zoom,
+                                                       luminosité, contraste)
+        ③ Sharpening léger                            (preprocessing_function)
+        ④ Normalisation /255 → float32 [0, 1]         (rescale)
+
+    Split utilisé : 85% train / 15% val (via validation_split Keras).
 
     Paramètres :
         color_dir (Path) : dossier 'color' du dataset PlantVillage
@@ -37,21 +79,28 @@ def build_keras_generators(color_dir: Path):
     print("─"*60)
 
     # ── Générateur entraînement (avec augmentation) ───────────────────────────
+    # Augmentation pertinente pour PlantVillage uniquement :
+    #   - flip_h     : symétrie gauche/droite OK (feuilles non orientées)
+    #   - rotation   : ±30° (inclinaison appareil)
+    #   - zoom       : ±20% (distance caméra)
+    #   - brightness : [0.65, 1.35] (ensoleillement/ombre)
+    #   - contrast   : [0.60, 1.50] géré dans preprocessing_function ci-dessous
+    # Supprimés : vertical_flip (feuilles jamais à l'envers) et bruit gaussien
+    # (dataset en conditions contrôlées, le bruit masquerait les lésions).
     train_datagen = ImageDataGenerator(
-        rescale=1.0 / 255,             # normalisation min-max → [0, 1]
-        rotation_range=30,             # rotation ±30°
-        width_shift_range=0.10,        # translation horizontale ±10%
-        height_shift_range=0.10,       # translation verticale ±10%
-        zoom_range=0.20,               # zoom ±20%
-        horizontal_flip=True,          # flip horizontal
-        vertical_flip=True,            # flip vertical
-        brightness_range=[0.65, 1.35], # luminosité ±35%
-        fill_mode="nearest",           # remplissage pixel voisin le plus proche
-        validation_split=0.15,         # 15% réservé à la validation
+        preprocessing_function=_train_preprocess,
+        rescale=1.0 / 255,
+        rotation_range=30,
+        zoom_range=0.20,
+        horizontal_flip=True,
+        brightness_range=[0.65, 1.35],
+        fill_mode="reflect",
+        validation_split=0.15,
     )
 
-    # ── Générateur validation/test (SANS augmentation) ────────────────────────
+    # ── Générateur validation/test (SANS augmentation, AVEC sharpening) ──────
     val_datagen = ImageDataGenerator(
+        preprocessing_function=_val_preprocess,
         rescale=1.0 / 255,
         validation_split=0.15,
     )

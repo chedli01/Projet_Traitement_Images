@@ -1,3 +1,6 @@
 plantvillage-dataset.zip
 plantvillage_dataset/
 plantvillage_dataset\PlantVillage
+__pycache__/
+*.pyc
+.venv

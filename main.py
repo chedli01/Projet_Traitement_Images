@@ -40,8 +40,8 @@ from visualization.plots import (
     plot_distribution,
     show_raw_samples,
     plot_resize,
+    plot_sharpening,
     plot_normalization,
-    plot_filtering,
     plot_augmentation,
     plot_full_pipeline,
 )
@@ -80,16 +80,16 @@ if __name__ == "__main__":
     # 6. Images brutes → figure 00
     show_raw_samples(samples)
 
-    # 7. Étape A — Redimensionnement → figure 02
+    # 7. Étape ① — Redimensionnement → figure 02
     plot_resize(samples)
 
-    # 8. Étape B — Normalisation → figure 03
+    # 8. Étape ② — Sharpening léger → figure 03
+    plot_sharpening(samples)
+
+    # 9. Étape ③ — Normalisation → figure 04
     plot_normalization(samples)
 
-    # 9. Étape C — Filtrage → figure 04
-    plot_filtering(samples)
-
-    # 10. Étape D — Augmentation → figure 05
+    # 10. Étape ④ — Augmentation (train uniquement) → figure 05
     plot_augmentation(samples)
 
     # 11. Pipeline complet → figure 06

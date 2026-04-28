@@ -8,8 +8,8 @@ Fonctions exportées :
     plot_distribution()       → 01_distribution_classes.png
     show_raw_samples()        → 00_echantillon_brut.png
     plot_resize()             → 02_avant_apres_resize.png
-    plot_normalization()      → 03_avant_apres_normalisation.png
-    plot_filtering()          → 04_avant_apres_filtrage.png
+    plot_sharpening()         → 03_avant_apres_sharpening.png
+    plot_normalization()      → 04_avant_apres_normalisation.png
     plot_augmentation()       → 05_avant_apres_augmentation.png
     plot_full_pipeline()      → 06_pipeline_final_complet.png
 """
@@ -28,9 +28,7 @@ from PIL import Image
 from config.settings import C, OUTPUT_DIR, IMG_SIZE_CNN, SEED
 from preprocessing.transforms import (
     resize_image, normalize_minmax,
-    apply_gaussian_filter, apply_median_filter,
-    apply_bilateral_filter, apply_sharpening,
-    compute_psnr, augment_image,
+    apply_sharpening, compute_psnr, augment_image,
 )
 
 
@@ -239,13 +237,14 @@ def plot_normalization(samples: list):
     for row, (path, label) in enumerate(sub_samples):
         img_orig = np.array(Image.open(path).convert("RGB"))
         img_128  = resize_image(img_orig, IMG_SIZE_CNN)
-        img_norm = normalize_minmax(img_128)
+        img_sh   = apply_sharpening(img_128)        # entrée réelle du /255
+        img_norm = normalize_minmax(img_sh)
 
         inner_gs = outer_gs[row].subgridspec(1, 4, wspace=0.35)
 
-        # Image brute
+        # Image brute (post-sharpening, avant /255)
         ax_img_raw = fig.add_subplot(inner_gs[0])
-        ax_img_raw.imshow(img_128)
+        ax_img_raw.imshow(img_sh)
         ax_img_raw.set_title(
             f"AVANT — {label.split('___')[-1].replace('_',' ')}\n(uint8 [0, 255])",
             fontsize=9, fontweight="bold", color=C["red"]
@@ -255,7 +254,7 @@ def plot_normalization(samples: list):
         # Histogramme brut
         ax_hist_raw = fig.add_subplot(inner_gs[1])
         for ch, (clr, lbl) in enumerate(zip(ch_colors, ch_labels)):
-            ax_hist_raw.hist(img_128[:, :, ch].ravel(), bins=64,
+            ax_hist_raw.hist(img_sh[:, :, ch].ravel(), bins=64,
                              color=clr, alpha=0.55, label=lbl, density=True)
         ax_hist_raw.set_title("Histogramme RGB (brut)", fontsize=9)
         ax_hist_raw.set_xlabel("Intensité [0, 255]", fontsize=8)
@@ -283,82 +282,90 @@ def plot_normalization(samples: list):
         ax_hist_norm.legend(fontsize=8)
         ax_hist_norm.set_facecolor(C["light"])
 
-    out = OUTPUT_DIR / "03_avant_apres_normalisation.png"
+    out = OUTPUT_DIR / "04_avant_apres_normalisation.png"
     plt.savefig(out, dpi=150, bbox_inches="tight", facecolor=C["light"])
     plt.close()
     print(f"  ✅ Normalisation appliquée → {out}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ÉTAPE C — FILTRAGE  (section 9)
+# ÉTAPE C — SHARPENING  (section 9)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_filtering(samples: list):
+def plot_sharpening(samples: list):
     """
-    Applique les 4 filtres sur des images réelles et génère une figure
-    comparative montrant avant / après chaque filtre.
+    Applique le sharpening léger sur des images réelles et génère une figure
+    avant / après. Inclut un crop zoomé sur une zone de lésion pour visualiser
+    l'accentuation des contours, ainsi que le PSNR.
+
+    Pourquoi un sharpening au lieu d'un gaussien ?
+        - Le dataset PlantVillage est en conditions contrôlées (0 image
+          corrompue) → aucun débruitage n'est nécessaire.
+        - Le redimensionnement bilinéaire 256→128 introduit un léger flou →
+          le sharpening compense cette perte de netteté.
+        - Les lésions/nécroses sont définies par leurs contours → on veut
+          les renforcer, pas les lisser.
 
     Figure :
-        Lignes = images d'exemple
-        Colonnes = [Brute | Gaussien | Médian | Bilatéral | Sharpening]
+        Lignes = images d'exemple (saine, taches, nécrose…)
+        Colonnes = [Brute 128×128 | Sharpening | Crop AVANT | Crop APRÈS]
     """
     print("\n" + "─"*60)
-    print("  ÉTAPE C — Filtrage et réduction du bruit")
+    print("  ÉTAPE C — Sharpening léger")
     print("─"*60)
 
-    sub_samples  = samples[:4]
-    n            = len(sub_samples)
-    filter_names = [
+    sub_samples = samples[:4]
+    n           = len(sub_samples)
+    col_titles  = [
         "AVANT\n(brut, 128×128)",
-        "Filtre Gaussien\n(σ=1.0)",
-        "Filtre Médian\n(noyau 3×3)",
-        "Filtre Bilatéral\n(d=9, σ=75)",
-        "Sharpening\n(Laplacien)",
+        "APRÈS\nSharpening léger",
+        "Détail (×4)\nAVANT",
+        "Détail (×4)\nAPRÈS",
     ]
-    col_colors = [C["red"], C["accent"], C["blue"], C["orange"], C["grey"]]
+    col_colors = [C["red"], C["accent"], C["red"], C["accent"]]
 
-    fig, axes = plt.subplots(n, 5, figsize=(18, n * 3.8), facecolor=C["light"])
-    fig.suptitle("CR2 — Étape C : Filtrage des Images (Comparaison des 4 filtres)",
+    fig, axes = plt.subplots(n, 4, figsize=(14, n * 3.6), facecolor=C["light"])
+    fig.suptitle("CR2 — Étape C : Sharpening léger (compensation du downscale)",
                  fontsize=13, fontweight="bold", color=C["dark"])
+
+    H, W   = IMG_SIZE_CNN
+    cy, cx = H // 2, W // 2
+    crop   = 32   # 32×32 → x4 zoom à l'affichage
 
     for row, (path, label) in enumerate(sub_samples):
         img_orig = np.array(Image.open(path).convert("RGB"))
         img_128  = resize_image(img_orig, IMG_SIZE_CNN)
+        img_sh   = apply_sharpening(img_128)
 
-        filtered_imgs = [
-            img_128,
-            apply_gaussian_filter(img_128, sigma=1.0),
-            apply_median_filter(img_128, ksize=3),
-            apply_bilateral_filter(img_128),
-            apply_sharpening(img_128),
-        ]
+        crop_before = img_128[cy - crop: cy + crop, cx - crop: cx + crop]
+        crop_after  = img_sh[cy - crop:  cy + crop, cx - crop: cx + crop]
 
-        for col, (filt_img, fname, fcol) in enumerate(
-            zip(filtered_imgs, filter_names, col_colors)
-        ):
-            axes[row, col].imshow(filt_img)
+        imgs = [img_128, img_sh, crop_before, crop_after]
+
+        for col, (im, ctitle, ccol) in enumerate(zip(imgs, col_titles, col_colors)):
+            axes[row, col].imshow(im, interpolation="nearest")
             if row == 0:
-                axes[row, col].set_title(fname, fontsize=9, fontweight="bold",
-                                         color=fcol, pad=6)
+                axes[row, col].set_title(ctitle, fontsize=9, fontweight="bold",
+                                         color=ccol, pad=6)
             if col == 0:
                 axes[row, col].set_ylabel(
                     label.split("___")[-1].replace("_", " "),
                     fontsize=8, fontweight="bold", labelpad=5
                 )
-            if col > 0:
-                psnr_val = compute_psnr(img_128, filt_img)
-                axes[row, col].set_xlabel(f"PSNR = {psnr_val:.1f} dB",
-                                          fontsize=8, color=C["dark"])
             axes[row, col].tick_params(left=False, bottom=False,
                                        labelleft=False, labelbottom=False)
             for spine in axes[row, col].spines.values():
                 spine.set_edgecolor("#CCCCCC")
 
+        psnr_val = compute_psnr(img_128, img_sh)
+        axes[row, 1].set_xlabel(f"PSNR = {psnr_val:.1f} dB",
+                                fontsize=8, color=C["dark"])
+
     plt.tight_layout()
-    out = OUTPUT_DIR / "04_avant_apres_filtrage.png"
+    out = OUTPUT_DIR / "03_avant_apres_sharpening.png"
     plt.savefig(out, dpi=150, bbox_inches="tight", facecolor=C["light"])
     plt.close()
-    print(f"  ✅ Filtrage appliqué → {out}")
+    print(f"  ✅ Sharpening appliqué → {out}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,17 +437,17 @@ def plot_augmentation(samples: list):
 def plot_full_pipeline(samples: list):
     """
     Génère la figure synthétique finale montrant UNE image traversant
-    toutes les étapes du pipeline de A à Z :
+    toutes les étapes du pipeline final de A à Z :
 
     Image brute (256×256)
-        ↓  Redimensionnement
-    128×128 (uint8)
-        ↓  Normalisation
-    128×128 (float32, [0,1])
-        ↓  Filtre Gaussien
-    128×128 (filtré)
-        ↓  Augmentation (exemple : rotation)
-    128×128 (augmenté)
+        ↓  ① Redimensionnement bilinéaire
+    128×128 uint8
+        ↓  ② Sharpening léger (compense le flou du downscale)
+    128×128 uint8 (contours renforcés)
+        ↓  ③ Normalisation /255
+    128×128 float32 [0, 1]
+        ↓  ④ Augmentation (train uniquement — exemple : rotation)
+    128×128 float32 [0, 1] augmenté
     """
     print("\n" + "─"*60)
     print("  FIGURE FINALE — Pipeline complet illustré")
@@ -453,17 +460,19 @@ def plot_full_pipeline(samples: list):
     img_brut  = np.array(Image.open(chosen_path).convert("RGB"))
     img_256   = resize_image(img_brut, (256, 256))
     img_128   = resize_image(img_brut, IMG_SIZE_CNN)
-    img_norm  = normalize_minmax(img_128)
-    img_gauss = apply_gaussian_filter(img_128, sigma=1.0)
-    img_aug   = augment_image(img_128, seed_offset=99)
-    img_final = list(img_aug.values())[2]    # prendre la rotation
+    img_sh    = apply_sharpening(img_128)
+    img_norm  = normalize_minmax(img_sh)
+    # Augmentation appliquée sur l'image normalisée (cast uint8 pour réutiliser
+    # les transformations OpenCV — purement visuel pour la figure finale)
+    img_aug_dict = augment_image((img_norm * 255).astype(np.uint8), seed_offset=99)
+    img_final    = list(img_aug_dict.values())[1].astype(np.float32) / 255.0   # rotation
 
     steps = [
-        (img_256,   "ORIGINAL (BRUT)\n256×256 px — uint8 [0,255]",     C["red"]),
-        (img_128,   "① REDIMENSIONNEMENT\n128×128 px — uint8 [0,255]", C["orange"]),
-        (img_norm,  "② NORMALISATION\n128×128 px — float32 [0,1]",     C["blue"]),
-        (img_gauss, "③ FILTRE GAUSSIEN\n128×128 px — σ=1.0",           C["grey"]),
-        (img_final, "④ AUGMENTATION\n128×128 px — Rotation",           C["accent"]),
+        (img_256,   "ORIGINAL (BRUT)\n256×256 px — uint8 [0,255]",      C["red"]),
+        (img_128,   "① REDIMENSIONNEMENT\n128×128 px — uint8 [0,255]",  C["orange"]),
+        (img_sh,    "② SHARPENING LÉGER\n128×128 px — uint8 [0,255]",   C["grey"]),
+        (img_norm,  "③ NORMALISATION\n128×128 px — float32 [0,1]",      C["blue"]),
+        (img_final, "④ AUGMENTATION (train)\n128×128 px — Rotation",    C["accent"]),
     ]
     n   = len(steps)
     fig = plt.figure(figsize=(n * 3.4, 7.5), facecolor=C["light"])

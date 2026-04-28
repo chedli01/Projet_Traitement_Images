@@ -17,7 +17,7 @@ import numpy as np
 BASE_DIR        = Path("./plantvillage_dataset")   # dossier après extraction du zip
 OUTPUT_DIR      = Path("./output_cr2")             # figures générées
 PROCESSED_DIR   = Path("./plantvillage_processed") # images prétraitées
-ZIP_NAME        = "plantvillage-dataset.zip"       # nom attendu du fichier zip
+ZIP_NAME        = " "       # nom attendu du fichier zip
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HYPERPARAMÈTRES

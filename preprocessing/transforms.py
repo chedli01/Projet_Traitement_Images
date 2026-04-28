@@ -15,7 +15,6 @@ import random
 import numpy as np
 import cv2
 from PIL import Image, ImageEnhance
-from scipy.ndimage import gaussian_filter
 
 from config.settings import SEED, IMG_SIZE_CNN
 
@@ -60,64 +59,42 @@ def normalize_minmax(img: np.ndarray) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# C — FILTRAGE
+# C — SHARPENING (renforcement de netteté)
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# Le dataset PlantVillage est acquis en conditions contrôlées (0 image corrompue),
+# donc aucun débruitage n'est nécessaire — un gaussien lisserait justement les
+# contours des lésions/nécroses qu'on cherche à détecter.
+# À la place, on applique un sharpening léger pour compenser le flou introduit
+# par le redimensionnement bilinéaire 256×256 → 128×128.
 
-def apply_gaussian_filter(img: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-    """
-    Filtre gaussien canal par canal.
-    Lisse le bruit léger sans trop dégrader les contours.
-    sigma=1.0 : lissage minimal adapté à PlantVillage (images propres).
-    """
-    out = np.zeros_like(img, dtype=np.float32)
-    for ch in range(img.shape[2]):
-        out[:, :, ch] = gaussian_filter(img[:, :, ch].astype(np.float32), sigma=sigma)
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
-def apply_median_filter(img: np.ndarray, ksize: int = 3) -> np.ndarray:
-    """
-    Filtre médian — élimine le bruit impulsionnel (sel & poivre).
-    ksize=3 : noyau 3×3, préserve les détails fins des lésions.
-    """
-    return cv2.medianBlur(img, ksize)
-
-
-def apply_bilateral_filter(img: np.ndarray,
-                            d: int = 9, sc: float = 75, ss: float = 75) -> np.ndarray:
-    """
-    Filtre bilatéral — lisse ET préserve les contours des zones malades.
-    Paramètres :
-        d  : diamètre du voisinage (9 = bon équilibre vitesse/qualité)
-        sc : sigma_color — sensibilité aux différences de couleur
-        ss : sigma_space — portée spatiale
-    """
-    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    res_bgr = cv2.bilateralFilter(img_bgr, d, sc, ss)
-    return cv2.cvtColor(res_bgr, cv2.COLOR_BGR2RGB)
+SHARPEN_KERNEL = np.array([[0, -1,  0],
+                           [-1, 5, -1],
+                           [0, -1,  0]], dtype=np.float32)
 
 
 def apply_sharpening(img: np.ndarray) -> np.ndarray:
     """
-    Renforcement des contours par filtre Laplacien.
-    Améliore la netteté des bords des lésions (utile pour CNN).
-    Noyau utilisé :
-        [[ 0, -1,  0],
-         [-1,  5, -1],
-         [ 0, -1,  0]]
+    Sharpening léger via convolution 2D.
+    Compense le flou introduit par le downscale 256→128 et accentue les
+    contours des taches et nécroses.
+
+    Accepte :
+        - uint8  [0, 255]  → retourne uint8  [0, 255]
+        - float  [0, 1]    → retourne float32 [0, 1]
+        - float  [0, 255]  → retourne float32 [0, 255]
     """
-    kernel    = np.array([[0, -1,  0],
-                          [-1, 5, -1],
-                          [0, -1,  0]], dtype=np.float32)
-    sharpened = cv2.filter2D(img, -1, kernel)
-    return np.clip(sharpened, 0, 255).astype(np.uint8)
+    sharpened = cv2.filter2D(img, -1, SHARPEN_KERNEL)
+    if img.dtype == np.uint8:
+        return np.clip(sharpened, 0, 255).astype(np.uint8)
+    high = 1.0 if img.max() <= 1.0 else 255.0
+    return np.clip(sharpened, 0, high).astype(np.float32)
 
 
 def compute_psnr(original: np.ndarray, filtered: np.ndarray) -> float:
     """
-    Calcule le PSNR (Peak Signal-to-Noise Ratio) en dB.
-    Mesure la qualité de la reconstruction par rapport à l'original.
-    Plus le PSNR est élevé, plus le filtre préserve l'image originale.
+    PSNR (Peak Signal-to-Noise Ratio) en dB. Mesure la déviation par rapport
+    à l'image source — utile pour quantifier l'impact du sharpening.
     """
     mse = np.mean((original.astype(float) - filtered.astype(float)) ** 2)
     return 20 * np.log10(255.0 / np.sqrt(mse)) if mse > 0 else float("inf")
@@ -129,17 +106,20 @@ def compute_psnr(original: np.ndarray, filtered: np.ndarray) -> float:
 
 def augment_image(img: np.ndarray, seed_offset: int = 0) -> dict:
     """
-    Applique 8 transformations d'augmentation sur une image réelle.
+    Applique les 5 transformations d'augmentation retenues pour PlantVillage.
 
-    Chaque transformation simule une variation naturelle du terrain :
+    Transformations conservées (cohérentes avec les générateurs Keras) :
         flip_h      → feuille orientée à gauche ou à droite
-        flip_v      → image prise à l'envers
-        rotation    → inclinaison de la feuille ou de l'appareil
-        zoom_in     → caméra plus proche de la feuille
-        zoom_out    → caméra plus loin
-        brightness  → ensoleillement / ombre
-        contrast    → différences de qualité d'appareil
-        noise       → bruit de capteur (smartphone bas de gamme)
+        rotation    → inclinaison de la feuille ou de l'appareil (±30°)
+        zoom        → caméra plus proche / plus loin (±20%)
+        brightness  → ensoleillement / ombre ([0.65, 1.35])
+        contrast    → différences de qualité d'appareil ([0.60, 1.50])
+
+    Transformations supprimées :
+        flip_v   → non pertinent (les feuilles sont toujours photographiées
+                   dans une orientation cohérente, pas à l'envers)
+        noise    → non pertinent (PlantVillage est en conditions contrôlées,
+                   ajouter du bruit risque de masquer les lésions à détecter)
 
     Paramètres :
         img         (np.ndarray) : image uint8 RGB 128×128
@@ -157,49 +137,39 @@ def augment_image(img: np.ndarray, seed_offset: int = 0) -> dict:
     # ── 1. Flip horizontal (symétrie gauche-droite) ───────────────────────────
     result["Flip Horizontal"] = cv2.flip(img, 1)
 
-    # ── 2. Flip vertical (symétrie haut-bas) ──────────────────────────────────
-    result["Flip Vertical"] = cv2.flip(img, 0)
-
-    # ── 3. Rotation aléatoire ±30° ────────────────────────────────────────────
+    # ── 2. Rotation aléatoire ±30° ────────────────────────────────────────────
     angle  = random.uniform(-30, 30)
     center = (W // 2, H // 2)
     M_rot  = cv2.getRotationMatrix2D(center, angle, 1.0)
-    # BORDER_REFLECT_101 : remplissage miroir (pas de bords noirs)
     result[f"Rotation ({angle:+.0f}°)"] = cv2.warpAffine(
         img, M_rot, (W, H), flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REFLECT_101
     )
 
-    # ── 4. Zoom In (recadrage central + redimensionnement) ────────────────────
-    zoom   = 0.85   # on garde 85% du centre → effet zoom +15%
+    # ── 3. Zoom In (recadrage central, ~+20%) ────────────────────────────────
+    zoom   = 0.80                          # 80% du centre → effet zoom +20%
     cy, cx = H // 2, W // 2
     h_crop = int(H * zoom / 2)
     w_crop = int(W * zoom / 2)
     cropped = img[cy - h_crop: cy + h_crop, cx - w_crop: cx + w_crop]
-    result["Zoom In (+15%)"] = cv2.resize(cropped, (W, H), interpolation=cv2.INTER_LINEAR)
+    result["Zoom In (+20%)"] = cv2.resize(cropped, (W, H), interpolation=cv2.INTER_LINEAR)
 
-    # ── 5. Zoom Out (padding + redimensionnement) ─────────────────────────────
-    pad        = int(min(H, W) * 0.12)
+    # ── 4. Zoom Out (padding miroir, ~-20%) ──────────────────────────────────
+    pad        = int(min(H, W) * 0.20)
     img_padded = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_REFLECT_101)
-    result["Zoom Out (-12%)"] = cv2.resize(img_padded, (W, H), interpolation=cv2.INTER_LINEAR)
+    result["Zoom Out (-20%)"] = cv2.resize(img_padded, (W, H), interpolation=cv2.INTER_LINEAR)
 
-    # ── 6. Variation de luminosité ────────────────────────────────────────────
-    factor = random.uniform(0.55, 1.50)   # 0.55 = très sombre, 1.5 = très clair
+    # ── 5. Variation de luminosité [0.65, 1.35] ──────────────────────────────
+    factor = random.uniform(0.65, 1.35)
     pil    = Image.fromarray(img)
     result[f"Luminosité (×{factor:.2f})"] = np.array(
         ImageEnhance.Brightness(pil).enhance(factor)
     )
 
-    # ── 7. Variation de contraste ─────────────────────────────────────────────
+    # ── 6. Variation de contraste [0.60, 1.50] ───────────────────────────────
     factor2 = random.uniform(0.60, 1.50)
     result[f"Contraste (×{factor2:.2f})"] = np.array(
         ImageEnhance.Contrast(pil).enhance(factor2)
     )
-
-    # ── 8. Bruit gaussien (σ=8) ────────────────────────────────────────────────
-    noise = np.random.normal(0, 8, img.shape).astype(np.int16)
-    result["Bruit Gaussien (σ=8)"] = np.clip(
-        img.astype(np.int16) + noise, 0, 255
-    ).astype(np.uint8)
 
     return result
